@@ -13,22 +13,28 @@ import (
 type StandAloneStorage struct {
 	// Your Data Here (1).
 	engine *engine_util.Engines
+	config *config.Config
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
 	// Your Code Here (1).
-	return &StandAloneStorage{}
+	kvPath := conf.DBPath + "/kv"
+	raftPath := conf.DBPath + "/raft"
+	kvEngine := engine_util.CreateDB(kvPath, false)
+	var raftEngine *badger.DB
+	if conf.Raft {
+		raftEngine = engine_util.CreateDB(raftPath, true)
+	}
+	engine := engine_util.NewEngines(kvEngine, raftEngine, kvPath, raftPath)
+
+	return &StandAloneStorage{
+		engine: engine,
+		config: conf,
+	}
 }
 
 func (s *StandAloneStorage) Start() error {
 	// Your Code Here (1).
-	kvPath := "/tmp/kv"
-	kv := engine_util.CreateDB(kvPath, false)
-
-	raftPath := "/tmp/raft"
-	raft := engine_util.CreateDB(raftPath, true)
-
-	s.engine = engine_util.NewEngines(kv, raft, kvPath, raftPath)
 	return nil
 }
 
@@ -66,7 +72,14 @@ type StandaloneReaderImp struct {
 }
 
 func (imp *StandaloneReaderImp) GetCF(cf string, key []byte) ([]byte, error) {
-	return engine_util.GetCF(imp.engine.Kv, cf, key)
+	value, err := engine_util.GetCF(imp.engine.Kv, cf, key)
+	if err != nil {
+		if err == badger.ErrKeyNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return value, err
 }
 
 func (imp *StandaloneReaderImp) IterCF(cf string) engine_util.DBIterator {

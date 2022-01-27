@@ -22,7 +22,11 @@ func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kv
 		return nil, err
 	}
 
-	return &kvrpcpb.RawGetResponse{Value: value}, nil
+	if value == nil {
+		return &kvrpcpb.RawGetResponse{NotFound: true}, nil
+	} else {
+		return &kvrpcpb.RawGetResponse{Value: value}, nil
+	}
 }
 
 // RawPut puts the target data into storage and returns the corresponding response
@@ -79,6 +83,7 @@ func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*
 
 	count := uint32(0)
 	iter := reader.IterCF(req.Cf)
+	iter.Seek(req.StartKey)
 	for count < req.Limit && iter.Valid() {
 		item := iter.Item()
 
@@ -92,6 +97,9 @@ func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*
 			Key:   key,
 			Value: val,
 		})
+
+		iter.Next()
+		count++
 	}
 
 	reader.Close()
