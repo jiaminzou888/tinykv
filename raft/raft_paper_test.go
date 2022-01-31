@@ -48,7 +48,10 @@ func TestLeaderUpdateTermFromMessage2AA(t *testing.T) {
 // smaller than the other’s, then it updates its current term to the larger
 // value. If a candidate or leader discovers that its term is out of date,
 // it immediately reverts to follower state.
-// Reference: section 5.1
+// Reference: section 5.1，包含3种情况
+// 1. 如果一个server存储的任期小于其他机器存储的任期，那么它将更新自己的任期到其它机器存储的最大任期。
+// 2. 如果是一个候选者或者leader发现自己的任期已经过期，它们会转变到参与者的状态。
+// 3. 如果一个server 接受到一个请求，这个请求中的任期是过时的，它将直接拒绝该请求。
 func testUpdateTermFromMessage(t *testing.T, state StateType) {
 	r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	switch state {
@@ -73,6 +76,7 @@ func testUpdateTermFromMessage(t *testing.T, state StateType) {
 
 // TestStartAsFollower tests that when servers start up, they begin as followers.
 // Reference: section 5.2
+// 1. 当servers启动的时候，都是作为参与者。
 func TestStartAsFollower2AA(t *testing.T) {
 	r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	if r.State != StateFollower {
@@ -80,10 +84,11 @@ func TestStartAsFollower2AA(t *testing.T) {
 	}
 }
 
-// TestLeaderBcastBeat tests that if the leader receives a heartbeat tick,
+// TestLeaderBroadcastBeat tests that if the leader receives a heartbeat tick,
 // it will send a MessageType_MsgHeartbeat with m.Index = 0, m.LogTerm=0 and empty entries
 // as heartbeat to all followers.
 // Reference: section 5.2
+// 1. leader会发送心跳到其它的server来授权延长自己的任期（empty entries: slice nil）
 func TestLeaderBcastBeat2AA(t *testing.T) {
 	// heartbeat interval
 	hi := 1
@@ -126,6 +131,9 @@ func TestCandidateStartNewElection2AA(t *testing.T) {
 // start a new election by incrementing its term and initiating another
 // round of RequestVote RPCs.
 // Reference: section 5.2
+// 如果一个参与者的选举定时器超时的时候还没有收到任何请求，它可以假设整个集群没有可用的leader或者候选者，然后发起新的选举
+// 1. 参与者增加自己本地存储的当前任期然后转变为候选者状态
+// 2. 这个候选者先选举自己，并行的给集群中的其它机器发送RequestVote RPCs
 func testNonleaderStartElection(t *testing.T, state StateType) {
 	// election timeout
 	et := 10
@@ -167,6 +175,10 @@ func testNonleaderStartElection(t *testing.T, state StateType) {
 // b) it loses the election
 // c) it is unclear about the result
 // Reference: section 5.2
+// 选举发生后，候选者将会一直保持候选状态直到下面三件事情中的任意一件发生：
+// 3.1 如果接受到集群中大多数机器在同一个任期的选票，那么它将胜出成为leader
+// 3.2 可能接受到来自其它server的请求，该请求声明自己已经成为leader。比较任期又有2种情况：请求中任期大，转变为follower；否则，拒绝请求，保持candidate
+// 3.3 整个集群的所有候选者都没有胜出，发生选举分裂
 func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 	tests := []struct {
 		size  int
@@ -207,6 +219,7 @@ func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 // TestFollowerVote tests that each follower will vote for at most one
 // candidate in a given term, on a first-come-first-served basis.
 // Reference: section 5.2
+// 1. 一个任期内，每个机器只能投票给一个候选者
 func TestFollowerVote2AA(t *testing.T) {
 	tests := []struct {
 		vote    uint64
@@ -242,6 +255,8 @@ func TestFollowerVote2AA(t *testing.T) {
 // to be leader whose term is at least as large as the candidate's current term,
 // it recognizes the leader as legitimate and returns to follower state.
 // Reference: section 5.2
+// 在等待选票的过程中，一个候选者可能接受到来自其它server的请求，该请求声明自己已经成为leader。
+// 1. 如果请求中的leader 的任期大于候选者本地存储的任期，那么当前候选者认为这个leader 是合法的并转变为参与者状态
 func TestCandidateFallback2AA(t *testing.T) {
 	tests := []pb.Message{
 		{From: 2, To: 1, Term: 1, MsgType: pb.MessageType_MsgAppend},
@@ -275,11 +290,12 @@ func TestCandidateElectionTimeoutRandomized2AA(t *testing.T) {
 // testNonleaderElectionTimeoutRandomized tests that election timeout for
 // follower or candidate is randomized.
 // Reference: section 5.2
+// 1. 选举超时时间：[et, 2*et)
 func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 	et := 10
 	r := newTestRaft(1, []uint64{1, 2, 3}, et, 1, NewMemoryStorage())
 	timeouts := make(map[int]bool)
-	for round := 0; round < 50*et; round++ {
+	for round := 0; round < 500*et; round++ {
 		switch state {
 		case StateFollower:
 			r.becomeFollower(r.Term+1, 2)
@@ -313,6 +329,7 @@ func TestCandidatesElectionTimeoutNonconflict2AA(t *testing.T) {
 // single server(follower or candidate) will time out, which reduces the
 // likelihood of split vote in the new election.
 // Reference: section 5.2
+// 1. 选举超时时间：[et, 2*et)
 func testNonleadersElectionTimeoutNonconflict(t *testing.T, state StateType) {
 	et := 10
 	size := 5
