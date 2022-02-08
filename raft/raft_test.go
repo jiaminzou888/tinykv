@@ -266,8 +266,8 @@ func TestLogReplication2AB(t *testing.T) {
 			newNetwork(nil, nil, nil),
 			[]pb.Message{
 				{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("somedata")}}},
-				{From: 1, To: 2, MsgType: pb.MessageType_MsgHup},
-				{From: 1, To: 2, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("somedata")}}},
+				{From: 1, To: 1, MsgType: pb.MessageType_MsgHup},
+				{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("somedata")}}},
 			},
 			4,
 		},
@@ -814,7 +814,7 @@ func testCandidateResetTerm(t *testing.T, mt pb.MessageType) {
 // TestDisruptiveFollower tests isolated follower,
 // with slow network incoming from leader, election times out
 // to become a candidate with an increased term. Then, the
-// candiate's response to late leader heartbeat forces the leader
+// candidate's response to late leader heartbeat forces the leader
 // to step down.
 func TestDisruptiveFollower2AA(t *testing.T) {
 	n1 := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())

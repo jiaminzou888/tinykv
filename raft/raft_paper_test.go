@@ -295,7 +295,7 @@ func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 	et := 10
 	r := newTestRaft(1, []uint64{1, 2, 3}, et, 1, NewMemoryStorage())
 	timeouts := make(map[int]bool)
-	for round := 0; round < 500*et; round++ {
+	for round := 0; round < 50*et; round++ {
 		switch state {
 		case StateFollower:
 			r.becomeFollower(r.Term+1, 2)
@@ -428,7 +428,6 @@ func TestLeaderCommitEntry2AB(t *testing.T) {
 	commitNoopEntry(r, s)
 	li := r.RaftLog.LastIndex()
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
-	// 其实我还没搞清楚message里的index到底是啥意思，因为append和appendResponse好像不一样
 	for _, m := range r.readMessages() {
 		r.Step(acceptAndReply(m))
 	}
