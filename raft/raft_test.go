@@ -125,6 +125,8 @@ func TestLeaderCycle2AA(t *testing.T) {
 // newly-elected leader does *not* have the newest (i.e. highest term)
 // log entries, and must overwrite higher-term log entries with
 // lower-term ones.
+// Figure8：前一任Leader在执行commit前宕机，但该日志却又已经被复制到大多数机器中，因此当前Index保留的是无效Leader的Term号
+// 此时，raft的操作是：直接修改在大多数机器上已复制成功index的Term号
 func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 	cfg := func(c *Config) {
 		c.peers = idsBySize(5)
@@ -1603,7 +1605,6 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 func (nw *network) send(msgs ...pb.Message) {
 	for len(msgs) > 0 {
 		m := msgs[0]
-		//fmt.Println(m.String())
 		p := nw.peers[m.To]
 		p.Step(m)
 		msgs = append(msgs[1:], nw.filter(p.readMessages())...)

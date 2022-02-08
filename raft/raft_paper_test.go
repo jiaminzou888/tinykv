@@ -377,6 +377,7 @@ func testNonleadersElectionTimeoutNonconflict(t *testing.T, state StateType) {
 // the new entries.
 // Also, it writes the new entry into stable storage.
 // Reference: section 5.3
+// 1. 客户端的每个请求包含了一条需要执行到状态机的命令。leader将命令追加到自己的日志记录，同时并发AppendEntries RPCs请求来进行日志复制
 func TestLeaderStartReplication2AB(t *testing.T) {
 	s := NewMemoryStorage()
 	r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, s)
@@ -384,7 +385,7 @@ func TestLeaderStartReplication2AB(t *testing.T) {
 	r.becomeLeader()
 	commitNoopEntry(r, s)
 	li := r.RaftLog.LastIndex()
-
+	// 客户端请求的propose只包含业务数据，内部的日志机制，它根本不关心，因此需要应用去维护
 	ents := []*pb.Entry{{Data: []byte("some data")}}
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: ents})
 
@@ -417,6 +418,8 @@ func TestLeaderStartReplication2AB(t *testing.T) {
 // and it includes that index in future AppendEntries RPCs so that the other
 // servers eventually find out.
 // Reference: section 5.3
+// 1. 一旦leader将一条日志成功的复制到集群的大多数机器，那么这条日志就是已提交状态
+// 2. leader维护了即将被提交的日志记录的索引，并把这个索引放在未来的AppendEntriesRPCs请求中
 func TestLeaderCommitEntry2AB(t *testing.T) {
 	s := NewMemoryStorage()
 	r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, s)
@@ -425,7 +428,7 @@ func TestLeaderCommitEntry2AB(t *testing.T) {
 	commitNoopEntry(r, s)
 	li := r.RaftLog.LastIndex()
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
-
+	// 其实我还没搞清楚message里的index到底是啥意思，因为append和appendResponse好像不一样
 	for _, m := range r.readMessages() {
 		r.Step(acceptAndReply(m))
 	}
@@ -455,6 +458,7 @@ func TestLeaderCommitEntry2AB(t *testing.T) {
 // TestLeaderAcknowledgeCommit tests that a log entry is committed once the
 // leader that created the entry has replicated it on a majority of the servers.
 // Reference: section 5.3
+// 模拟propose被leader接收后，append给其他机器，其他机器做不同反应时的commit情况，
 func TestLeaderAcknowledgeCommit2AB(t *testing.T) {
 	tests := []struct {
 		size      int
@@ -497,6 +501,7 @@ func TestLeaderAcknowledgeCommit2AB(t *testing.T) {
 // entries created by previous leaders.
 // Also, it applies the entry to its local state machine (in log order).
 // Reference: section 5.3
+// storage模拟的就是当前commit log前的所有log，包含之前leader的log
 func TestLeaderCommitPrecedingEntries2AB(t *testing.T) {
 	tests := [][]pb.Entry{
 		{},
@@ -631,6 +636,7 @@ func TestFollowerCheckMessageType_MsgAppend2AB(t *testing.T) {
 // and append any new entries not already in the log.
 // Also, it writes the new entry into stable storage.
 // Reference: section 5.3
+// 1. Raft是通过强制参与者只能复制leader的日志来解决不一致。这就意味者参与者的日志和leader的日志发生冲突的时候，参与者的日志将会重写或者删除
 func TestFollowerAppendEntries2AB(t *testing.T) {
 	tests := []struct {
 		index, term uint64
@@ -822,6 +828,8 @@ func TestVoteRequest2AB(t *testing.T) {
 // TestVoter tests the voter denies its vote if its own log is more up-to-date
 // than that of the candidate.
 // Reference: section 5.4.1
+// 1. 如果两个日志文件的最后一条日志的任期不相同，谁的任期更大谁的的日志将更新。
+// 2. 如果两条日志记录的任期相同，那么谁的索引越大，谁的日志将更新。
 func TestVoter2AB(t *testing.T) {
 	tests := []struct {
 		ents    []pb.Entry
@@ -867,6 +875,8 @@ func TestVoter2AB(t *testing.T) {
 // TestLeaderOnlyCommitsLogFromCurrentTerm tests that only log entries from the leader’s
 // current term are committed by counting replicas.
 // Reference: section 5.4.2
+// 尽管上一任期的某条日志已经被复制到了大多数机器，但是新任leader 还是不能准确断定这条日志是否是已提交
+// 因此，leader只敢提交自己当前任期的日志，一旦当前任期看到一条日志被提交，由于Log Matching Property 保证，那么这条日志之前的日志已自动被提交
 func TestLeaderOnlyCommitsLogFromCurrentTerm2AB(t *testing.T) {
 	ents := []pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}}
 	tests := []struct {
@@ -925,6 +935,7 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	}
 	// ignore further messages to refresh followers' commit index
 	r.readMessages()
+	// 收到一个append log被回应后，就从内存进入了存储被持久化，移动stable下标
 	s.Append(r.RaftLog.unstableEntries())
 	r.RaftLog.applied = r.RaftLog.committed
 	r.RaftLog.stabled = r.RaftLog.LastIndex()
