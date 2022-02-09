@@ -444,115 +444,93 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		r.becomeFollower(m.Term, m.From)
 	}
 
-	if r.Term > m.Term {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From:    m.To,
-			To:      m.From,
-			Term:    r.Term,
-			Index:   m.Index,
-			Reject:  true,
-		})
-		return
-	}
+	reject := false
 
-	if m.Commit > 0 {
-		r.RaftLog.committed = m.Commit
-	}
-
-	// 如果是append的response
-	logTerm, _ := r.RaftLog.Term(m.Index)
-	if m.LogTerm != logTerm {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From:    m.To,
-			To:      m.From,
-			Term:    r.Term,
-			Index:   m.Index,
-			Reject:  true,
-		})
-		return
-	}
-
-	// 因为log matching property，匹配位置之前的日志条目一定完全相同。但匹配位置之后的数据，分情况讨论
-	if len(m.Entries) <= 0 {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From:    m.To,
-			To:      m.From,
-			Term:    r.Term,
-			Index:   m.Index,
-			Reject:  false,
-		})
-		return
-	}
-
-	// 1. 当前follower暂无数据，直接追加日志数据
-	if len(r.RaftLog.entries) <= 0 {
-		for _, ent := range m.Entries {
-			r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+	for {
+		// Log Match Property：比较任期，上条日志存在
+		if r.Term > m.Term {
+			reject = true
+			break
 		}
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From:    m.To,
-			To:      m.From,
-			Term:    r.Term,
-			Index:   r.RaftLog.LastIndex(),
-			Reject:  false,
-		})
-		return
-	}
 
-	// 2. 当前follower有数据，但匹配位置不同
-	if logTerm == 0 && m.Index == 0 {
-		// 2.1 匹配上空位置，查看后续位置是否匹配
-		idx := uint64(0)
-		msgLen := uint64(len(m.Entries))
-		logLen := uint64(len(r.RaftLog.entries))
-		for idx = 0; idx < msgLen && idx < logLen; idx++ {
-			if m.Entries[idx].Index != r.RaftLog.entries[idx].Index ||
-				m.Entries[idx].Term != r.RaftLog.entries[idx].Term {
-				break
-			}
+		logTerm, _ := r.RaftLog.Term(m.Index)
+		if m.LogTerm != logTerm {
+			reject = true
+			break
 		}
-		if idx == msgLen {
-			// 匹配所有msg ent，啥都不干
-		} else if idx == logLen {
-			// 匹配所有log ent，往后追加
-			for ; idx < msgLen; idx++ {
-				r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[idx])
+
+		// 0. 没有附带日志entry，仅仅是Commit消息
+		if len(m.Entries) <= 0 {
+			break
+		}
+		// 1. 当前follower暂无数据，直接追加日志数据
+		if len(r.RaftLog.entries) <= 0 {
+			for _, ent := range m.Entries {
+				r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 			}
-		} else {
-			// 中途不匹配，先清理，再追加
-			if idx == uint64(0) {
-				r.RaftLog.stabled = 0
-				r.RaftLog.entries = []pb.Entry{}
-				for _, ent := range m.Entries {
-					r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+			break
+		}
+		// 2. 当前follower有数据，但匹配位置不同
+		if logTerm == 0 && m.Index == 0 {
+			// 2.1 匹配上空位置，查看后续位置是否匹配
+			idx := uint64(0)
+			msgLen := uint64(len(m.Entries))
+			logLen := uint64(len(r.RaftLog.entries))
+			for idx = 0; idx < msgLen && idx < logLen; idx++ {
+				if m.Entries[idx].Index != r.RaftLog.entries[idx].Index ||
+					m.Entries[idx].Term != r.RaftLog.entries[idx].Term {
+					break
+				}
+			}
+			if idx == msgLen {
+				// 匹配所有msg ent，啥都不干
+			} else if idx == logLen {
+				// 匹配所有log ent，往后追加
+				for ; idx < msgLen; idx++ {
+					r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[idx])
 				}
 			} else {
-				r.RaftLog.entries = r.RaftLog.entries[:idx]
-				if r.RaftLog.stabled > r.RaftLog.entries[idx-1].Index {
-					r.RaftLog.stabled = r.RaftLog.entries[idx-1].Index
+				// 中途不匹配，先清理，再追加
+				if idx == uint64(0) {
+					r.RaftLog.stabled = 0
+					r.RaftLog.entries = []pb.Entry{}
+					for _, ent := range m.Entries {
+						r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+					}
+				} else {
+					r.RaftLog.entries = r.RaftLog.entries[:idx]
+					if r.RaftLog.stabled > r.RaftLog.entries[idx-1].Index {
+						r.RaftLog.stabled = r.RaftLog.entries[idx-1].Index
+					}
 				}
 			}
-		}
-	} else {
-		// 2.2 匹配在其他位置，先清理原数据，再用msgEntries数据
-		idx := uint64(len(r.RaftLog.entries) - 1)
-		for i, ent := range r.RaftLog.entries {
-			if ent.Term == m.LogTerm && ent.Index == m.Index {
-				idx = uint64(i)
-				break
+		} else {
+			// 2.2 匹配在其他位置，先清理原数据，再用msgEntries数据
+			idx := uint64(len(r.RaftLog.entries) - 1)
+			for i, ent := range r.RaftLog.entries {
+				if ent.Term == m.LogTerm && ent.Index == m.Index {
+					idx = uint64(i)
+					break
+				}
+			}
+			r.RaftLog.entries = r.RaftLog.entries[:idx+1]
+			if r.RaftLog.stabled > r.RaftLog.entries[idx].Index {
+				r.RaftLog.stabled = r.RaftLog.entries[idx].Index
+			}
+			for _, ent := range m.Entries {
+				r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 			}
 		}
-		r.RaftLog.entries = r.RaftLog.entries[:idx+1]
-		if r.RaftLog.stabled > r.RaftLog.entries[idx].Index {
-			r.RaftLog.stabled = r.RaftLog.entries[idx].Index
+		break
+	}
+
+	// 只有有效的append才更新commit
+	if !reject && r.Lead == m.From && m.Commit > r.RaftLog.committed {
+		lastNewEntryIndex := m.Index
+		if len(m.Entries) > 0 {
+			lastNewEntryIndex = m.Entries[len(m.Entries)-1].Index
 		}
-		for _, ent := range m.Entries {
-			r.RaftLog.entries = append(r.RaftLog.entries, *ent)
-		}
+		r.RaftLog.committed = min(m.Commit, lastNewEntryIndex)
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
@@ -561,7 +539,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		To:      m.From,
 		Term:    r.Term,
 		Index:   r.RaftLog.LastIndex(),
-		Reject:  false,
+		Reject:  reject,
 	})
 }
 
@@ -664,7 +642,7 @@ func (r *Raft) processElection(m pb.Message) {
 }
 
 func (r *Raft) responseVote(m pb.Message) {
-	if m.MsgType != pb.MessageType_MsgRequestVote || m.To != r.id {
+	if m.MsgType != pb.MessageType_MsgRequestVote {
 		return
 	}
 
@@ -684,6 +662,9 @@ func (r *Raft) responseVote(m pb.Message) {
 
 		if lastTerm != m.LogTerm {
 			if lastTerm > m.LogTerm {
+				if m.Term > r.Term {
+					r.becomeFollower(m.Term, None)
+				}
 				r.msgs = append(r.msgs, pb.Message{
 					MsgType: pb.MessageType_MsgRequestVoteResponse,
 					From:    m.To,
@@ -695,6 +676,9 @@ func (r *Raft) responseVote(m pb.Message) {
 			}
 		} else {
 			if lastIndex > m.Index {
+				if m.Term > r.Term {
+					r.becomeFollower(m.Term, None)
+				}
 				r.msgs = append(r.msgs, pb.Message{
 					MsgType: pb.MessageType_MsgRequestVoteResponse,
 					From:    m.To,
