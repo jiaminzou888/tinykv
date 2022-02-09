@@ -581,7 +581,7 @@ func (r *Raft) removeNode(id uint64) {
 // -----------------------------------------------------------
 
 func (r *Raft) startElection(m pb.Message) {
-	if m.MsgType != pb.MessageType_MsgHup || m.From != m.To {
+	if m.MsgType != pb.MessageType_MsgHup {
 		return
 	}
 
@@ -618,7 +618,7 @@ func (r *Raft) startElection(m pb.Message) {
 }
 
 func (r *Raft) processElection(m pb.Message) {
-	if m.MsgType != pb.MessageType_MsgRequestVoteResponse || m.To != r.id {
+	if m.MsgType != pb.MessageType_MsgRequestVoteResponse {
 		return
 	}
 
@@ -719,7 +719,7 @@ func (r *Raft) responseVote(m pb.Message) {
 }
 
 func (r *Raft) triggerHeartbeat(m pb.Message) {
-	if m.MsgType != pb.MessageType_MsgBeat || m.To != r.id {
+	if m.MsgType != pb.MessageType_MsgBeat {
 		return
 	}
 
@@ -735,7 +735,7 @@ func (r *Raft) triggerHeartbeat(m pb.Message) {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
-	if m.MsgType != pb.MessageType_MsgPropose || m.To != r.id {
+	if m.MsgType != pb.MessageType_MsgPropose {
 		return
 	}
 
@@ -781,7 +781,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
-	if m.MsgType != pb.MessageType_MsgAppendResponse || m.To != r.id {
+	if m.MsgType != pb.MessageType_MsgAppendResponse {
 		return
 	}
 
