@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -43,6 +44,26 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	if !d.RaftGroup.HasReady() {
+		return
+	}
+	// raft中的逻辑是由upper application驱动发送的。上层应用通过ready，把msg读出来，通过网络发送出去，并主动调用Step和Advance推进raft
+	rd := d.RaftGroup.Ready()
+	_, err := d.peerStorage.SaveReadyState(&rd)
+	if err != nil {
+		panic(fmt.Sprintf("HandleRaftReady SaveReadyState err:%s", err))
+	}
+	d.Send(d.ctx.trans, rd.Messages)
+	if len(rd.CommittedEntries) > 0 {
+		for _, entry := range rd.CommittedEntries {
+			_ = d.process(entry)
+		}
+	}
+	d.RaftGroup.Advance(rd)
+}
+
+func (d *peerMsgHandler) process(entry eraftpb.Entry) error {
+	return nil
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {

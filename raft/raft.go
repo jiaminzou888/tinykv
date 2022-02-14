@@ -185,9 +185,12 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 	}
 
-	hardState, _, err := raft.RaftLog.storage.InitialState()
+	hardState, confState, err := raft.RaftLog.storage.InitialState()
 	if err != nil {
 		panic(fmt.Sprintf("raft newRaft InitialState err:%s", err))
+	}
+	if c.peers == nil {
+		c.peers = confState.Nodes
 	}
 
 	raft.Vote = hardState.Vote
