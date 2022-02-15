@@ -35,7 +35,7 @@ func newMemoryStorageWithEnts(ents []pb.Entry) *MemoryStorage {
 // nextEnts returns the appliable entries and updates the applied index
 func nextEnts(r *Raft, s *MemoryStorage) (ents []pb.Entry) {
 	// Transfer all unstable entries to "stable" storage.
-	s.Append(r.RaftLog.unstableEntries())
+	_ = s.Append(r.RaftLog.unstableEntries())
 	r.RaftLog.stabled = r.RaftLog.LastIndex()
 
 	ents = r.RaftLog.nextEnts()

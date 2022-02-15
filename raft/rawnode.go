@@ -158,23 +158,21 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-
-	// prepare
 	rd := Ready{
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 	}
 
-	// update
 	if len(rn.Raft.msgs) > 0 {
 		rd.Messages = rn.Raft.msgs
 	}
-	if rn.prevSoftState.Lead != rn.Raft.Lead ||
-		rn.prevSoftState.RaftState != rn.Raft.State {
+
+	if rn.prevSoftState.Lead != rn.Raft.Lead || rn.prevSoftState.RaftState != rn.Raft.State {
 		rn.prevSoftState.Lead = rn.Raft.Lead
 		rn.prevSoftState.RaftState = rn.Raft.State
 		rd.SoftState = rn.prevSoftState
 	}
+
 	hardState := pb.HardState{
 		Term:   rn.Raft.Term,
 		Vote:   rn.Raft.Vote,
@@ -182,14 +180,15 @@ func (rn *RawNode) Ready() Ready {
 	}
 	if !isHardStateEqual(hardState, rn.prevHardState) {
 		rn.prevHardState = hardState
+		rd.HardState = hardState
 	}
 
-	// clean
-	rn.Raft.msgs = make([]pb.Message, 0)
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 		rn.Raft.RaftLog.pendingSnapshot = nil
 	}
+
+	rn.Raft.msgs = make([]pb.Message, 0)
 
 	return rd
 }

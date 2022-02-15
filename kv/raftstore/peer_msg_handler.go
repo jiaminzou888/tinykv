@@ -47,11 +47,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if !d.RaftGroup.HasReady() {
 		return
 	}
-	// raft中的逻辑是由upper application驱动发送的。上层应用通过ready，把msg读出来，通过网络发送出去，并主动调用Step和Advance推进raft
+	// application通过ready，把msg读出来，通过网络发送出去，并主动调用Step和Advance推进raft
 	rd := d.RaftGroup.Ready()
+	// 这里处理的是raft所有unstable的日志，raft module已经完全保证了entries的完整和有序，此处只需要持久化落地即可
 	_, err := d.peerStorage.SaveReadyState(&rd)
 	if err != nil {
-		panic(fmt.Sprintf("HandleRaftReady SaveReadyState err:%s", err))
+		panic(err)
 	}
 	d.Send(d.ctx.trans, rd.Messages)
 	if len(rd.CommittedEntries) > 0 {

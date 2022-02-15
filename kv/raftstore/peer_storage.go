@@ -308,6 +308,53 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) <= 0 {
+		return nil
+	}
+
+	// 这种判断方式比较通用和简洁，请理解使用
+	psFirst, _ := ps.FirstIndex()
+	psLast, _ := ps.LastIndex()
+	psLen := psLast - psFirst + 1
+
+	appendFirst := entries[0].Index
+	appendLast := entries[0].Index + uint64(len(entries)) - 1
+
+	// shortcut if there is no new entry.
+	if appendLast < psFirst {
+		return nil
+	}
+	// truncate compacted entries
+	if appendLast > entries[0].Index {
+		entries = entries[psFirst-entries[0].Index:]
+	}
+
+	offset := appendFirst - psFirst
+	switch {
+	case psLen > offset:
+		for index := appendFirst; index <= psLast; index++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, index))
+		}
+		for _, ent := range entries {
+			if err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent); err != nil {
+				panic(err)
+			}
+		}
+	case psLen == offset:
+		for _, ent := range entries {
+			if err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent); err != nil {
+				panic(err)
+			}
+		}
+	default:
+		log.Panicf("missing log entry [last: %d, append at: %d]", psLast, appendFirst)
+	}
+
+	ps.raftState.LastIndex = appendLast
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
+
+	// 因为Append只作为SaveReadyState的一个子函数，所以这里的raftState不用落地，直接在外层统一原子化逻辑即可
+
 	return nil
 }
 
@@ -331,7 +378,41 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	var result *ApplySnapResult
+	var err error
+
+	for {
+		raftWB := &engine_util.WriteBatch{}
+
+		// snapshot
+		if !raft.IsEmptySnap(&ready.Snapshot) {
+			kvWB := &engine_util.WriteBatch{}
+			result, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+			if err != nil {
+				break
+			}
+			err = kvWB.WriteToDB(ps.Engines.Kv)
+			if err != nil {
+				break
+			}
+		}
+
+		// unstable entries + raftlocalstate
+		if err = ps.Append(ready.Entries, raftWB); err != nil {
+			break
+		}
+		if !raft.IsEmptyHardState(ready.HardState) {
+			ps.raftState.HardState = &ready.HardState
+		}
+		if err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
+			break
+		}
+		err = raftWB.WriteToDB(ps.Engines.Raft)
+
+		break
+	}
+
+	return result, err
 }
 
 func (ps *PeerStorage) ClearData() {
