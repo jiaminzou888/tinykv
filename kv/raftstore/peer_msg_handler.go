@@ -2,6 +2,8 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
@@ -54,27 +56,142 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if err != nil {
 		panic(err)
 	}
+	// 本地raft module已经做好了自己的所有处理，此处的message是需要发给其他peer确认的消息
 	d.Send(d.ctx.trans, rd.Messages)
+	// 已经被大多数peer认可的entry，application需要处理并应用了
 	if len(rd.CommittedEntries) > 0 {
+		// 对于可能存在的多个persist，一定要用WriteBatch
+		wb := &engine_util.WriteBatch{}
 		for _, entry := range rd.CommittedEntries {
-			_ = d.process(entry)
+			wb = d.process(entry, wb)
+			if d.stopped {
+				return
+			}
 		}
+		// 更新applyState并persist
+		d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+		if err = wb.SetMeta(meta.ApplyStateKey(d.Region().Id), d.peerStorage.applyState); err != nil {
+			panic(err)
+		}
+		// 当所有需要更新的操作都填充完毕，一次性原子化真正更新
+		wb.MustWriteToDB(d.peerStorage.Engines.Kv)
 	}
+	// applyState已经在前面更新完成
 	d.RaftGroup.Advance(rd)
 }
 
-func (d *peerMsgHandler) process(entry eraftpb.Entry) error {
-	return nil
+func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	msg := raft_cmdpb.RaftCmdRequest{}
+	// 该entry对应的Data经过propose，已经被大多数Peer采纳并在本地commit了，此时application需要把它apply掉(更新kv中的数据，更新raft中的状态)
+	if err := msg.Unmarshal(entry.Data); err != nil {
+		panic(err)
+	}
+	if len(msg.Requests) > 0 {
+		return d.processRaftAdminCommand(&msg, entry, wb)
+	}
+	if msg.AdminRequest != nil {
+		return d.processRaftNormalCommand(&msg, entry, wb)
+	}
+	// 有可能是选举的请求和应答，没有需要对kv状态机的更新
+	return wb
+}
+
+func (d *peerMsgHandler) processRaftAdminCommand(msg *raft_cmdpb.RaftCmdRequest, entry eraftpb.Entry,
+	wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	return wb
+}
+
+func (d *peerMsgHandler) processRaftNormalCommand(msg *raft_cmdpb.RaftCmdRequest, entry eraftpb.Entry,
+	wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	if len(msg.Requests) > 0 {
+		log.Fatalf("%s process NormalCommand requests, size:%n", d.Tag, len(msg.Requests))
+	}
+	req := msg.Requests[0]
+	key := d.getRequestKey(req)
+	if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+		d.handleProposal(entry, func(p *proposal) {
+			p.cb.Done(ErrResp(err))
+		})
+		return wb
+	}
+	rsp := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{},
+	}
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Put:
+		wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+		log.Debugf("%s set cf %s-%s-%s", d.Tag, req.Put.Cf, req.Put.Key, req.Put.Value)
+	case raft_cmdpb.CmdType_Delete:
+		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+		log.Debugf("%s delete cf %s-%s", d.Tag, req.Delete.Cf, req.Delete.Key)
+	}
+	d.handleProposal(entry, func(p *proposal) {
+		var err error
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Get:
+			var value []byte
+			if value, err = engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key); err != nil {
+				value = nil
+			}
+			log.Debugf("%s get cf %s-%s-%s", d.Tag, req.Get.Cf, req.Get.Key, value)
+			rsp.Responses = append(rsp.Responses, &raft_cmdpb.Response{
+				CmdType: raft_cmdpb.CmdType_Get,
+				Get:     &raft_cmdpb.GetResponse{Value: value},
+			})
+		case raft_cmdpb.CmdType_Put:
+			rsp.Responses = append(rsp.Responses, &raft_cmdpb.Response{
+				CmdType: raft_cmdpb.CmdType_Put,
+				Put:     &raft_cmdpb.PutResponse{},
+			})
+		case raft_cmdpb.CmdType_Delete:
+			rsp.Responses = append(rsp.Responses, &raft_cmdpb.Response{
+				CmdType: raft_cmdpb.CmdType_Delete,
+				Delete:  &raft_cmdpb.DeleteResponse{},
+			})
+		case raft_cmdpb.CmdType_Snap:
+			log.Debugf("%s snap", d.Tag)
+		}
+		p.cb.Done(rsp)
+	})
+	return wb
+}
+
+func (d *peerMsgHandler) handleProposal(entry eraftpb.Entry, handler func(p *proposal)) {
+	if len(d.proposals) <= 0 {
+		return
+	}
+	idx := -1
+	for i, propose := range d.proposals {
+		if propose.index == entry.Index {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		log.Errorf(fmt.Sprintf("Entry Term:%d, Index:%d, Cannot find propose, what happened?\n", entry.Term, entry.Index))
+		return
+	}
+	propose := d.proposals[idx]
+	if propose.index == entry.Index {
+		if propose.term != entry.Term {
+			NotifyStaleReq(entry.Term, propose.cb)
+		} else {
+			handler(propose)
+		}
+	}
+	d.proposals = append(d.proposals[:idx], d.proposals[idx+1:]...)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
+		// 验证和转发执行raft消息：本质上就是2A里多个node之间传递的消息（vote、propose、append、commit等）
 		raftMsg := msg.Data.(*rspb.RaftMessage)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
 	case message.MsgTypeRaftCmd:
+		// 处理客户端发出的raft读写命令
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
@@ -136,6 +253,61 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	if msg.AdminRequest != nil {
+		d.proposeRaftAdminCommand(msg, cb)
+	} else {
+		d.proposeRaftNormalCommand(msg, cb)
+	}
+}
+
+func (d *peerMsgHandler) proposeRaftAdminCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	return
+}
+
+func (d *peerMsgHandler) proposeRaftNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	// 客户端发过来的数据操作请求
+	if len(msg.Requests) > 0 {
+		log.Fatalf("%s process NormalCommand requests, size:%n", d.Tag, len(msg.Requests))
+	}
+	req := msg.Requests[0]
+	key := d.getRequestKey(req)
+	if key == nil {
+		return
+	}
+	err := util.CheckKeyInRegion(key, d.Region())
+	if err != nil {
+		cb.Done(ErrResp(err))
+	}
+
+	// 直接将当前节点region数据的所有类型的请求序列化后，propose出去，只有当请求被dominant peers认可后，才会在本地反序列化执行!
+	data, err := msg.Marshal()
+	if err != nil {
+		cb.Done(ErrResp(err))
+	}
+	// 这里直接lastIndex+1，是因为串行？否则，并发冲突后就只能重试了
+	d.proposals = append(d.proposals, &proposal{
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	})
+	err = d.RaftGroup.Propose(data)
+	if err != nil {
+		cb.Done(ErrResp(err))
+	}
+}
+
+func (d *peerMsgHandler) getRequestKey(req *raft_cmdpb.Request) []byte {
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Get:
+		return req.Get.Key
+	case raft_cmdpb.CmdType_Put:
+		return req.Put.Key
+	case raft_cmdpb.CmdType_Delete:
+		return req.Delete.Key
+	case raft_cmdpb.CmdType_Snap:
+		return nil
+	}
+	return nil
 }
 
 func (d *peerMsgHandler) onTick() {

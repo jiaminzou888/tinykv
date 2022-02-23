@@ -129,6 +129,7 @@ func (c *Cluster) Start() {
 			Id:      storeID,
 			Address: "",
 		}
+		// 这个相当于Store启动后，向pd注册自己
 		err := c.schedulerClient.PutStore(context.TODO(), store)
 		if err != nil {
 			panic(err)

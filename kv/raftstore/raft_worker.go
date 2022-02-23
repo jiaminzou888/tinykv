@@ -45,6 +45,7 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 		for i := 0; i < pending; i++ {
 			msgs = append(msgs, <-rw.raftCh)
 		}
+		// 处理上层应用通过RaftCh传递的消息，驱动内部的raftNode执行raft协议的逻辑，内部状态发生变化
 		peerStateMap := make(map[uint64]*peerState)
 		for _, msg := range msgs {
 			peerState := rw.getPeerState(peerStateMap, msg.RegionID)
@@ -53,6 +54,7 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 			}
 			newPeerMsgHandler(peerState.peer, rw.ctx).HandleMsg(msg)
 		}
+		// 处理完所有msg，raftNode确实发生改变后，上层应用获取变化的结果，并应用到状态机并更新raft状态
 		for _, peerState := range peerStateMap {
 			newPeerMsgHandler(peerState.peer, rw.ctx).HandleRaftReady()
 		}
