@@ -267,7 +267,7 @@ func LogTypeToString(t LogType) (string, string) {
 
 func New() *Logger {
 	w := os.Stderr
-	w, _ = os.Create("/Users/zoujiamin/go/src/github.com/golang/tinykv/project2b.log")
+	//w, _ = os.Create("/Users/zoujiamin/go/src/github.com/golang/tinykv/project2b.log")
 	return NewLogger(w, "")
 }
 
