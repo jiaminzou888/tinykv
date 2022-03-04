@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 	"time"
@@ -230,17 +231,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 		return true
 	}
 
-	process := r.Prs[to]
-	if process.Next == 0 && process.Match == 0 {
-		process = &Progress{
-			Next:  r.RaftLog.committed + 1,
-			Match: r.RaftLog.committed,
-		}
-		r.Prs[to] = process
-	}
-
 	totalNextEntries := []*pb.Entry{}
 
+	process := r.Prs[to]
 	startNextIdx := len(r.RaftLog.entries)
 	// 整个循环共用i和ent变量，并非一次循环新建一个，有坑
 	for i, ent := range r.RaftLog.entries {
@@ -275,17 +268,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
-	lastIndex := r.RaftLog.LastIndex()
-	lastTerm, _ := r.RaftLog.Term(lastIndex)
-
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeat,
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
-		LogTerm: lastTerm,
-		Index:   lastIndex,
-		Commit:  r.RaftLog.committed,
 	})
 }
 
@@ -432,11 +419,11 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
-			for peer, _ := range r.Prs {
-				r.sendAppend(peer)
-			}
+			r.handleHeartbeatResponse(m)
 		}
 	}
+	log.Infof("raft_id:%d, lead_id:%d, term:%d, state:%s received msg:%v, ready to send msgs:%v",
+		r.id, r.Lead, r.Term, r.State, m, r.msgs)
 	return nil
 }
 
@@ -553,20 +540,34 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
+	// most logic is same as `AppendEntries`
+	// Reply false if term < currentTerm (§5.1)
 	reject := false
-	if r.Term <= m.Term {
-		r.becomeFollower(m.Term, m.From)
-		r.Lead = m.From
-		r.resetVars()
-	} else {
+	if m.Term < r.Term {
 		reject = true
+	} else {
+		r.becomeFollower(m.Term, m.From)
+		// Reply false if log does not contain an entry at prevLogIndex
+		// whose term matches prevLogTerm (§5.3)
+		term, err := r.RaftLog.Term(m.Index)
+		if err != nil || term != m.LogTerm {
+			reject = true
+		} else {
+			if m.Commit > r.RaftLog.committed {
+				r.RaftLog.committed = min(m.Commit, r.RaftLog.LastIndex())
+			}
+		}
 	}
+	index := r.RaftLog.LastIndex()
+	logTerm, _ := r.RaftLog.Term(index)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		From:    m.To,
 		To:      m.From,
 		Term:    m.Term,
 		Reject:  reject,
+		Index:   index,
+		LogTerm: logTerm,
 	})
 }
 
@@ -851,4 +852,26 @@ func (r *Raft) resetVars() {
 	for id, _ := range r.votes {
 		r.votes[id] = false
 	}
+}
+
+func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, None)
+		return
+	}
+	// leader can send log to follower when
+	// it received a heartbeat response which
+	// indicate it doesn't have update-to-date log
+	if r.isMoreUpToDateThan(m.LogTerm, m.Index) {
+		r.sendAppend(m.From)
+	}
+}
+
+func (r *Raft) isMoreUpToDateThan(logTerm, index uint64) bool {
+	lastIndex := r.RaftLog.LastIndex()
+	lastTerm, _ := r.RaftLog.Term(lastIndex)
+	if lastTerm > logTerm || (lastTerm == logTerm && lastIndex > index) {
+		return true
+	}
+	return false
 }

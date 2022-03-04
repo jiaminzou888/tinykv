@@ -113,7 +113,9 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		return 0
+		// 因为在2b中，storage index初始化中无entry，但initIndex是5
+		index, _ := l.storage.LastIndex()
+		return index
 	} else {
 		return l.entries[len(l.entries)-1].Index
 	}
@@ -122,9 +124,14 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	for _, ent := range l.entries {
-		if ent.Index == i {
-			return ent.Term, nil
+	if len(l.entries) == 0 {
+		// 因为在2b中，storage term初始化中无entry，但initTerm是5
+		return l.storage.Term(i)
+	} else {
+		for _, ent := range l.entries {
+			if ent.Index == i {
+				return ent.Term, nil
+			}
 		}
 	}
 	return 0, nil

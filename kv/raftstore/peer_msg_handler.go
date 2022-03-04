@@ -87,10 +87,10 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch
 		panic(err)
 	}
 	if len(msg.Requests) > 0 {
-		return d.processRaftAdminCommand(&msg, entry, wb)
+		return d.processRaftNormalCommand(&msg, entry, wb)
 	}
 	if msg.AdminRequest != nil {
-		return d.processRaftNormalCommand(&msg, entry, wb)
+		return d.processRaftAdminCommand(&msg, entry, wb)
 	}
 	// 有可能是选举的请求和应答，没有需要对kv状态机的更新
 	return wb
@@ -103,9 +103,6 @@ func (d *peerMsgHandler) processRaftAdminCommand(msg *raft_cmdpb.RaftCmdRequest,
 
 func (d *peerMsgHandler) processRaftNormalCommand(msg *raft_cmdpb.RaftCmdRequest, entry eraftpb.Entry,
 	wb *engine_util.WriteBatch) *engine_util.WriteBatch {
-	if len(msg.Requests) > 0 {
-		log.Fatalf("%s process NormalCommand requests, size:%n", d.Tag, len(msg.Requests))
-	}
 	req := msg.Requests[0]
 	key := d.getRequestKey(req)
 	if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
@@ -149,7 +146,11 @@ func (d *peerMsgHandler) processRaftNormalCommand(msg *raft_cmdpb.RaftCmdRequest
 				Delete:  &raft_cmdpb.DeleteResponse{},
 			})
 		case raft_cmdpb.CmdType_Snap:
-			log.Debugf("%s snap", d.Tag)
+			rsp.Responses = append(rsp.Responses, &raft_cmdpb.Response{
+				CmdType: raft_cmdpb.CmdType_Snap,
+				Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+			})
+			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 		}
 		p.cb.Done(rsp)
 	})
@@ -266,23 +267,24 @@ func (d *peerMsgHandler) proposeRaftAdminCommand(msg *raft_cmdpb.RaftCmdRequest,
 
 func (d *peerMsgHandler) proposeRaftNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	// 客户端发过来的数据操作请求
-	if len(msg.Requests) > 0 {
-		log.Fatalf("%s process NormalCommand requests, size:%n", d.Tag, len(msg.Requests))
-	}
 	req := msg.Requests[0]
 	key := d.getRequestKey(req)
-	if key == nil {
-		return
-	}
-	err := util.CheckKeyInRegion(key, d.Region())
-	if err != nil {
-		cb.Done(ErrResp(err))
+	if key != nil {
+		// 当key!=nil，校验key是否在当前region
+		err := util.CheckKeyInRegion(key, d.Region())
+		if err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+	} else {
+		// 当key==nil，有可能是snapshot消息，也要处理
 	}
 
 	// 直接将当前节点region数据的所有类型的请求序列化后，propose出去，只有当请求被dominant peers认可后，才会在本地反序列化执行!
 	data, err := msg.Marshal()
 	if err != nil {
 		cb.Done(ErrResp(err))
+		return
 	}
 	// 这里直接lastIndex+1，是因为串行？否则，并发冲突后就只能重试了
 	d.proposals = append(d.proposals, &proposal{
@@ -293,6 +295,7 @@ func (d *peerMsgHandler) proposeRaftNormalCommand(msg *raft_cmdpb.RaftCmdRequest
 	err = d.RaftGroup.Propose(data)
 	if err != nil {
 		cb.Done(ErrResp(err))
+		return
 	}
 }
 
@@ -402,9 +405,9 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 // return false means the message is invalid, and can be ignored.
 func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	regionID := msg.GetRegionId()
-	from := msg.GetFromPeer()
+	// from := msg.GetFromPeer()
 	to := msg.GetToPeer()
-	log.Debugf("[region %d] handle raft message %s from %d to %d", regionID, msg, from.GetId(), to.GetId())
+	// log.Debugf("[region %d] handle raft message %s from %d to %d", regionID, msg, from.GetId(), to.GetId())
 	if to.GetStoreId() != d.storeID() {
 		log.Warnf("[region %d] store not match, to store id %d, mine %d, ignore it",
 			regionID, to.GetStoreId(), d.storeID())

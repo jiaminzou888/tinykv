@@ -304,52 +304,43 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 	return nil
 }
 
-// Append the given entries to the raft log and update ps.raftState also delete log entries that will
-// never be committed
+// Append the given entries to the raft log and update ps.raftState also delete log entries that will never be committed
+// 我们要做的是将append进去的entries的lastIndex到原本在storage中的lastIndex之间的日志条目全部删除。为什么是这样呢？
+// 首先，我们要删除append进去的entries的firstIndex到原本在storage中的lastIndex之间的日志条目，因为这些已经过时了，它们没有被commit，并且来自上一任Leader，所以他们永远没有机会被提交。
+// 其次，append进去的entries的firstIndex到lastIndex之间的条目已经将原本这些Index的条目覆盖了，所以只要删除那些没有被覆盖的部分就行了。
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
 	if len(entries) <= 0 {
 		return nil
 	}
 
-	// 这种判断方式比较通用和简洁，请理解使用
+	// 这部分处理比较通用和简洁，注意掌握
+
 	psFirst, _ := ps.FirstIndex()
 	psLast, _ := ps.LastIndex()
-	psLen := psLast - psFirst + 1
 
 	appendFirst := entries[0].Index
 	appendLast := entries[0].Index + uint64(len(entries)) - 1
 
-	// shortcut if there is no new entry.
+	// 完全没必要append日志
 	if appendLast < psFirst {
 		return nil
 	}
-	// truncate compacted entries
-	if appendLast > entries[0].Index {
-		entries = entries[psFirst-entries[0].Index:]
+	// 裁剪没必要append的日志
+	if appendFirst < psFirst {
+		entries = entries[psFirst-appendFirst:]
 	}
-
-	offset := appendFirst - psFirst
-	switch {
-	case psLen > offset:
-		for index := appendFirst; index <= psLast; index++ {
+	// 覆盖相同index的日志
+	for _, ent := range entries {
+		_ = raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent)
+	}
+	// 删除多余的永远不会被commit的日志
+	if appendLast < psLast {
+		for index := appendLast + 1; index <= psLast; index++ {
 			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, index))
 		}
-		for _, ent := range entries {
-			if err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent); err != nil {
-				panic(err)
-			}
-		}
-	case psLen == offset:
-		for _, ent := range entries {
-			if err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, ent.Index), &ent); err != nil {
-				panic(err)
-			}
-		}
-	default:
-		log.Panicf("missing log entry [last: %d, append at: %d]", psLast, appendFirst)
 	}
-
+	// 更新append的日志信息
 	ps.raftState.LastIndex = appendLast
 	ps.raftState.LastTerm = entries[len(entries)-1].Term
 

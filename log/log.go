@@ -266,7 +266,9 @@ func LogTypeToString(t LogType) (string, string) {
 }
 
 func New() *Logger {
-	return NewLogger(os.Stderr, "")
+	w := os.Stderr
+	w, _ = os.Create("/Users/zoujiamin/go/src/github.com/golang/tinykv/project2b.log")
+	return NewLogger(w, "")
 }
 
 func NewLogger(w io.Writer, prefix string) *Logger {

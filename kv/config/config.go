@@ -62,7 +62,7 @@ const (
 )
 
 func getLogLevel() (logLevel string) {
-	logLevel = "debug"
+	logLevel = "info"
 	if l := os.Getenv("LOG_LEVEL"); len(l) != 0 {
 		logLevel = l
 	}
