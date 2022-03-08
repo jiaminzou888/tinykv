@@ -405,6 +405,7 @@ func TestManyPartitionsOneClient2B(t *testing.T) {
 
 func TestManyPartitionsManyClients2B(t *testing.T) {
 	// Test: partitions, many clients (2B) ...
+	// error sometime by jaminzou
 	GenericTest(t, "2B", 5, false, false, true, -1, false, false)
 }
 

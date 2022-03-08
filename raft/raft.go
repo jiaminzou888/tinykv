@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	"fmt"
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 	"time"
@@ -227,28 +226,35 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	if to == r.id {
+	lastIndex := r.RaftLog.LastIndex()
+	preLogIndex := r.Prs[to].Next - 1
+	if lastIndex < preLogIndex {
 		return true
 	}
 
-	totalNextEntries := []*pb.Entry{}
-
-	process := r.Prs[to]
-	startNextIdx := len(r.RaftLog.entries)
-	// 整个循环共用i和ent变量，并非一次循环新建一个，有坑
-	for i, ent := range r.RaftLog.entries {
-		if ent.Index == process.Next {
-			startNextIdx = i
+	preLogTerm, err := r.RaftLog.Term(preLogIndex)
+	if err != nil {
+		if err == ErrCompacted {
+			if err = r.sendSnapshot(to); err != nil {
+				return false
+			}
+			return true
 		}
-		tmp := ent
-		if i >= startNextIdx {
-			totalNextEntries = append(totalNextEntries, &tmp)
-		}
+		return false
 	}
 
-	var prevEntry pb.Entry
-	if startNextIdx > 0 {
-		prevEntry = r.RaftLog.entries[startNextIdx-1]
+	// 这里有问题，logIndex下标和entries下标是2个东西，注意转换
+	first, _ := r.RaftLog.storage.FirstIndex()
+	entries := r.RaftLog.entries[preLogIndex-first+1 : lastIndex-first+1]
+
+	totalNextEntries := make([]*pb.Entry, 0)
+	for _, en := range entries {
+		totalNextEntries = append(totalNextEntries, &pb.Entry{
+			EntryType: en.EntryType,
+			Term:      en.Term,
+			Index:     en.Index,
+			Data:      en.Data,
+		})
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
@@ -256,13 +262,31 @@ func (r *Raft) sendAppend(to uint64) bool {
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
-		Index:   prevEntry.Index,
-		LogTerm: prevEntry.Term,
+		Index:   preLogIndex,
+		LogTerm: preLogTerm,
 		Entries: totalNextEntries,
 		Commit:  r.RaftLog.committed,
 	})
 
 	return true
+}
+
+func (r *Raft) sendSnapshot(to uint64) error {
+	snap, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return err
+	}
+
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Term:     r.Term,
+		Snapshot: &snap,
+	})
+	r.Prs[to].Next = snap.Metadata.Index + 1
+
+	return nil
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -328,14 +352,11 @@ func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
 	r.State = StateLeader
+	r.Lead = r.id
 
 	lastIndex := r.RaftLog.LastIndex()
-	for id, process := range r.Prs {
-		if id == r.id {
-			process.Match = lastIndex
-		} else {
-			process.Match = 0
-		}
+	for _, process := range r.Prs {
+		process.Match = lastIndex
 		process.Next = lastIndex + 1
 	}
 
@@ -347,6 +368,8 @@ func (r *Raft) becomeLeader() {
 		Entries: []*pb.Entry{
 			{
 				EntryType: pb.EntryType_EntryNormal,
+				Term:      r.Term,
+				Index:     lastIndex + 1,
 				Data:      nil,
 			},
 		},
@@ -363,32 +386,34 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHup:
 			r.startElection(m)
 		case pb.MessageType_MsgPropose:
-			fmt.Printf("follower id:%d propose:%s.\n", r.id, m.String())
+			//fmt.Printf("follower id:%d propose:%s.\n", r.id, m.String())
 		case pb.MessageType_MsgAppend:
 			r.handleAppendEntries(m)
 		case pb.MessageType_MsgAppendResponse:
-			fmt.Printf("follower id:%d append response:%s.\n", r.id, m.String())
+			//fmt.Printf("follower id:%d append response:%s.\n", r.id, m.String())
 		case pb.MessageType_MsgRequestVote:
 			r.responseVote(m)
 		case pb.MessageType_MsgRequestVoteResponse:
-			fmt.Printf("follower id:%d get voteResponse from:%d which is reverted to before.\n", r.id, m.From)
+			//fmt.Printf("follower id:%d get voteResponse from:%d which is reverted to before.\n", r.id, m.From)
 		case pb.MessageType_MsgBeat:
 			r.triggerHeartbeat(m)
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
-			fmt.Printf("follower id:%d get heartbeatResponse from:%d which is reverted to before.\n", r.id, m.From)
+			//fmt.Printf("follower id:%d get heartbeatResponse from:%d which is reverted to before.\n", r.id, m.From)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		}
 	case StateCandidate:
 		switch m.MsgType {
 		case pb.MessageType_MsgHup:
 			r.startElection(m)
 		case pb.MessageType_MsgPropose:
-			fmt.Printf("candidate id:%d propose: %s, what happend?\n", r.id, m.String())
+			//fmt.Printf("candidate id:%d propose: %s, what happend?\n", r.id, m.String())
 		case pb.MessageType_MsgAppend:
 			r.handleAppendEntries(m)
 		case pb.MessageType_MsgAppendResponse:
-			fmt.Printf("candidate id:%d append response:%s, what happend?\n", r.id, m.String())
+			//fmt.Printf("candidate id:%d append response:%s, what happend?\n", r.id, m.String())
 		case pb.MessageType_MsgRequestVote:
 			r.responseVote(m)
 		case pb.MessageType_MsgRequestVoteResponse:
@@ -398,7 +423,9 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
-			fmt.Printf("candidate id:%d get heartbeatResponse from:%d, what happend?\n", r.id, m.From)
+			//fmt.Printf("candidate id:%d get heartbeatResponse from:%d, what happend?\n", r.id, m.From)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		}
 	case StateLeader:
 		switch m.MsgType {
@@ -420,10 +447,12 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
 			r.handleHeartbeatResponse(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		}
 	}
-	log.Infof("raft_id:%d, lead_id:%d, term:%d, state:%s received msg:%v, ready to send msgs:%v",
-		r.id, r.Lead, r.Term, r.State, m, r.msgs)
+	//log.Infof("raft_id:%d, lead_id:%d, term:%d, state:%s received msg:%v, ready to send msgs:%v",
+	//	r.id, r.Lead, r.Term, r.State, m, r.msgs)
 	return nil
 }
 
@@ -574,6 +603,18 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	// 但凡某个node收到了snapshot信息，如果(term+index)验证通过，该节点就应该准备替换和安装snapshot
+	// snapshot：kv状态机 + metadata term+index
+	if m.Snapshot == nil {
+		return
+	}
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	// 当前集群中的节点
+	meta := m.Snapshot.Metadata
+	r.Prs = make(map[uint64]*Progress)
+	for _, prs := range meta.ConfState.Nodes {
+		r.Prs[prs] = &Progress{}
+	}
 }
 
 // addNode add a new node to raft group
@@ -753,20 +794,16 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 	lastIndex := r.RaftLog.LastIndex()
 
+	// 在入口确保，master的index一定是+1递增的
 	ents := []*pb.Entry{}
 	for _, ent := range m.Entries {
-		index := uint64(0)
-		if len(ents) == 0 {
-			index = lastIndex + 1
-		} else {
-			index = ents[len(ents)-1].Index
-		}
 		ents = append(ents, &pb.Entry{
-			EntryType: pb.EntryType_EntryNormal,
+			EntryType: ent.EntryType,
 			Term:      r.Term,
-			Index:     index,
+			Index:     lastIndex + 1,
 			Data:      ent.Data,
 		})
+		lastIndex += 1
 	}
 
 	for _, ent := range ents {
@@ -775,7 +812,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 	for id := range r.Prs {
 		if id == r.id {
-			r.Prs[id].Match = lastIndex + uint64(len(ents))
+			r.Prs[id].Match = r.RaftLog.LastIndex()
 			r.Prs[id].Next = r.Prs[id].Match + 1
 		} else {
 			r.sendAppend(id)
@@ -800,6 +837,10 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if m.Reject {
 		r.Prs[m.From].Next--
 		r.sendAppend(m.From)
+		return
+	}
+
+	if r.Prs[m.From].Match >= m.Index {
 		return
 	}
 
@@ -835,8 +876,10 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 
 	// committed有新的更新，通知其他节点准备应用
 	if commitChange {
-		for peer, _ := range r.Prs {
-			r.sendAppend(peer)
+		for id, _ := range r.Prs {
+			if id != r.id {
+				r.sendAppend(id)
+			}
 		}
 	}
 }

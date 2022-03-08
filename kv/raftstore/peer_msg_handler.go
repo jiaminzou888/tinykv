@@ -169,7 +169,6 @@ func (d *peerMsgHandler) handleProposal(entry eraftpb.Entry, handler func(p *pro
 		}
 	}
 	if idx == -1 {
-		log.Errorf(fmt.Sprintf("Entry Term:%d, Index:%d, Cannot find propose, what happened?\n", entry.Term, entry.Index))
 		return
 	}
 	propose := d.proposals[idx]

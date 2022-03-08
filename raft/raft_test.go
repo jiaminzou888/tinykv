@@ -1048,7 +1048,7 @@ func TestRestoreIgnoreSnapshot2C(t *testing.T) {
 }
 
 func TestProvideSnap2C(t *testing.T) {
-	// restore the state machine from a snapshot so it has a compacted log and a snapshot
+	// restore the state machine from a snapshot, so it has a compacted log and a snapshot
 	s := pb.Snapshot{
 		Metadata: &pb.SnapshotMetadata{
 			Index:     11, // magic number

@@ -31,22 +31,22 @@ type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
 	storage Storage
 
-	// committed is the highest log position that is known to be in
-	// stable storage on a quorum of nodes.
-	committed uint64
+	// all entries that have not yet compact.
+	entries []pb.Entry
 
 	// applied is the highest log position that the application has
 	// been instructed to apply to its state machine.
 	// Invariant: applied <= committed
 	applied uint64
 
+	// committed is the highest log position that is known to be in
+	// stable storage on a quorum of nodes.
+	committed uint64
+
 	// log entries with index <= stabled are persisted to storage.
 	// It is used to record the logs that are not persisted by storage yet.
 	// Everytime handling `Ready`, the unstabled logs will be included.
 	stabled uint64
-
-	// all entries that have not yet compact.
-	entries []pb.Entry
 
 	// the incoming unstable snapshot, if any.
 	// (Used in 2C)
@@ -112,27 +112,35 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	if len(l.entries) == 0 {
-		// 因为在2b中，storage index初始化中无entry，但initIndex是5
-		index, _ := l.storage.LastIndex()
-		return index
-	} else {
-		return l.entries[len(l.entries)-1].Index
+	var snapLast uint64
+	// pendingSnapshot表示接下来要apply的快照
+	if !IsEmptySnap(l.pendingSnapshot) {
+		snapLast = l.pendingSnapshot.Metadata.Index
 	}
+	if len(l.entries) > 0 {
+		return max(l.entries[len(l.entries)-1].Index, snapLast)
+	}
+	// 因为在2b中，storage index初始化中无entry，但initIndex是5
+	index, _ := l.storage.LastIndex()
+	return max(index, snapLast)
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if len(l.entries) == 0 {
-		// 因为在2b中，storage term初始化中无entry，但initTerm是5
-		return l.storage.Term(i)
-	} else {
+	if len(l.entries) > 0 {
 		for _, ent := range l.entries {
 			if ent.Index == i {
 				return ent.Term, nil
 			}
 		}
 	}
-	return 0, nil
+	// 因为在2b中，storage term初始化中无entry，但initTerm是5
+	term, err := l.storage.Term(i)
+	if err != nil && !IsEmptySnap(l.pendingSnapshot) {
+		if i == l.pendingSnapshot.Metadata.Index {
+			return l.pendingSnapshot.Metadata.Term, nil
+		}
+	}
+	return term, err
 }
